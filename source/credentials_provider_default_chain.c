@@ -31,7 +31,7 @@ AWS_STATIC_STRING_FROM_LITERAL(s_ecs_creds_env_token, "AWS_CONTAINER_AUTHORIZATI
 AWS_STATIC_STRING_FROM_LITERAL(s_ecs_host, "169.254.170.2");
 AWS_STATIC_STRING_FROM_LITERAL(s_ec2_creds_env_disable, "AWS_EC2_METADATA_DISABLED");
 
-AWS_STATIC_STRING_FROM_LITERAL(s_credentials_provider_env_chain, "AWS_CREDENTIAL_PROVIDER_CHAIN");
+// AWS_STATIC_STRING_FROM_LITERAL(s_credentials_provider_env_chain, "AWS_CREDENTIAL_PROVIDER_CHAIN");
 const struct aws_byte_cursor s_credentials_provider_environment = AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("Environment");
 const struct aws_byte_cursor s_credentials_provider_profile = AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("Profile");
 const struct aws_byte_cursor s_credentials_provider_sts = AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("STS");
@@ -369,7 +369,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
             continue;
         }
 
-        // Does not match
+        // Does not match Log
     }
 
     // enum { providers_size = 4 };
@@ -430,7 +430,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
         goto on_error;
     }
 
-    for (int i = 0; i < index; i++) {
+    for (size_t i = 0; i < index; i++) {
         /*
          * Transfer ownership
          */
