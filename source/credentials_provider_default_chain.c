@@ -37,13 +37,95 @@ const struct aws_byte_cursor s_credentials_provider_profile = AWS_BYTE_CUR_INIT_
 const struct aws_byte_cursor s_credentials_provider_sts = AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("STS");
 const struct aws_byte_cursor s_credentials_provider_ecs_container =
     AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("EcsContainer");
+const struct aws_byte_cursor s_credentials_provider_imds = AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("Ec2InstanceMetadata");
 #define PROVIDERS_SIZE 6
 
-/**
- * ECS and IMDS credentials providers are mutually exclusive,
- * ECS has higher priority
- */
-static struct aws_credentials_provider *s_aws_credentials_provider_new_ecs_or_imds(
+// /**
+//  * ECS and IMDS credentials providers are mutually exclusive,
+//  * ECS has higher priority
+//  */
+// static struct aws_credentials_provider *s_aws_credentials_provider_new_ecs_or_imds(
+//     struct aws_allocator *allocator,
+//     const struct aws_credentials_provider_shutdown_options *shutdown_options,
+//     struct aws_client_bootstrap *bootstrap,
+//     struct aws_tls_ctx *tls_ctx) {
+
+//     struct aws_byte_cursor auth_token_cursor;
+//     AWS_ZERO_STRUCT(auth_token_cursor);
+
+//     struct aws_credentials_provider *ecs_or_imds_provider = NULL;
+//     struct aws_string *ecs_relative_uri = NULL;
+//     struct aws_string *ecs_full_uri = NULL;
+//     struct aws_string *ec2_imds_disable = NULL;
+//     struct aws_string *ecs_token = NULL;
+
+//     if (aws_get_environment_value(allocator, s_ecs_creds_env_relative_uri, &ecs_relative_uri) != AWS_OP_SUCCESS ||
+//         aws_get_environment_value(allocator, s_ecs_creds_env_full_uri, &ecs_full_uri) != AWS_OP_SUCCESS ||
+//         aws_get_environment_value(allocator, s_ec2_creds_env_disable, &ec2_imds_disable) != AWS_OP_SUCCESS ||
+//         aws_get_environment_value(allocator, s_ecs_creds_env_token, &ecs_token) != AWS_OP_SUCCESS) {
+//         AWS_LOGF_ERROR(
+//             AWS_LS_AUTH_CREDENTIALS_PROVIDER,
+//             "Failed reading environment variables during default credentials provider chain initialization.");
+//         goto clean_up;
+//     }
+
+//     if (ecs_token && ecs_token->len) {
+//         auth_token_cursor = aws_byte_cursor_from_string(ecs_token);
+//     }
+
+//     /*
+//      * ToDo: the uri choice logic should be done in the ecs provider init logic.  As it stands, it's a nightmare
+//      * to try and use the ecs provider anywhere outside the default chain.
+//      */
+//     if (ecs_relative_uri && ecs_relative_uri->len) {
+//         struct aws_credentials_provider_ecs_options ecs_options = {
+//             .shutdown_options = *shutdown_options,
+//             .bootstrap = bootstrap,
+//             .host = aws_byte_cursor_from_string(s_ecs_host),
+//             .path_and_query = aws_byte_cursor_from_string(ecs_relative_uri),
+//             .tls_ctx = NULL,
+//             .auth_token = auth_token_cursor,
+//         };
+//         ecs_or_imds_provider = aws_credentials_provider_new_ecs(allocator, &ecs_options);
+
+//     } else if (ecs_full_uri && ecs_full_uri->len) {
+//         struct aws_uri uri;
+//         struct aws_byte_cursor uri_cstr = aws_byte_cursor_from_string(ecs_full_uri);
+//         if (AWS_OP_ERR == aws_uri_init_parse(&uri, allocator, &uri_cstr)) {
+//             goto clean_up;
+//         }
+
+//         struct aws_credentials_provider_ecs_options ecs_options = {
+//             .shutdown_options = *shutdown_options,
+//             .bootstrap = bootstrap,
+//             .host = uri.host_name,
+//             .path_and_query = uri.path_and_query,
+//             .tls_ctx = aws_byte_cursor_eq_c_str_ignore_case(&(uri.scheme), "HTTPS") ? tls_ctx : NULL,
+//             .auth_token = auth_token_cursor,
+//             .port = uri.port,
+//         };
+
+//         ecs_or_imds_provider = aws_credentials_provider_new_ecs(allocator, &ecs_options);
+//         aws_uri_clean_up(&uri);
+//     } else if (ec2_imds_disable == NULL || aws_string_eq_c_str_ignore_case(ec2_imds_disable, "false")) {
+//         struct aws_credentials_provider_imds_options imds_options = {
+//             .shutdown_options = *shutdown_options,
+//             .bootstrap = bootstrap,
+//         };
+//         ecs_or_imds_provider = aws_credentials_provider_new_imds(allocator, &imds_options);
+//     }
+
+// clean_up:
+
+//     aws_string_destroy(ecs_relative_uri);
+//     aws_string_destroy(ecs_full_uri);
+//     aws_string_destroy(ec2_imds_disable);
+//     aws_string_destroy(ecs_token);
+
+//     return ecs_or_imds_provider;
+// }
+
+static struct aws_credentials_provider *s_aws_credentials_provider_new_ecs(
     struct aws_allocator *allocator,
     const struct aws_credentials_provider_shutdown_options *shutdown_options,
     struct aws_client_bootstrap *bootstrap,
@@ -52,15 +134,13 @@ static struct aws_credentials_provider *s_aws_credentials_provider_new_ecs_or_im
     struct aws_byte_cursor auth_token_cursor;
     AWS_ZERO_STRUCT(auth_token_cursor);
 
-    struct aws_credentials_provider *ecs_or_imds_provider = NULL;
+    struct aws_credentials_provider *ecs_provider = NULL;
     struct aws_string *ecs_relative_uri = NULL;
     struct aws_string *ecs_full_uri = NULL;
-    struct aws_string *ec2_imds_disable = NULL;
     struct aws_string *ecs_token = NULL;
 
     if (aws_get_environment_value(allocator, s_ecs_creds_env_relative_uri, &ecs_relative_uri) != AWS_OP_SUCCESS ||
         aws_get_environment_value(allocator, s_ecs_creds_env_full_uri, &ecs_full_uri) != AWS_OP_SUCCESS ||
-        aws_get_environment_value(allocator, s_ec2_creds_env_disable, &ec2_imds_disable) != AWS_OP_SUCCESS ||
         aws_get_environment_value(allocator, s_ecs_creds_env_token, &ecs_token) != AWS_OP_SUCCESS) {
         AWS_LOGF_ERROR(
             AWS_LS_AUTH_CREDENTIALS_PROVIDER,
@@ -85,7 +165,7 @@ static struct aws_credentials_provider *s_aws_credentials_provider_new_ecs_or_im
             .tls_ctx = NULL,
             .auth_token = auth_token_cursor,
         };
-        ecs_or_imds_provider = aws_credentials_provider_new_ecs(allocator, &ecs_options);
+        ecs_provider = aws_credentials_provider_new_ecs(allocator, &ecs_options);
 
     } else if (ecs_full_uri && ecs_full_uri->len) {
         struct aws_uri uri;
@@ -104,24 +184,17 @@ static struct aws_credentials_provider *s_aws_credentials_provider_new_ecs_or_im
             .port = uri.port,
         };
 
-        ecs_or_imds_provider = aws_credentials_provider_new_ecs(allocator, &ecs_options);
+        ecs_provider = aws_credentials_provider_new_ecs(allocator, &ecs_options);
         aws_uri_clean_up(&uri);
-    } else if (ec2_imds_disable == NULL || aws_string_eq_c_str_ignore_case(ec2_imds_disable, "false")) {
-        struct aws_credentials_provider_imds_options imds_options = {
-            .shutdown_options = *shutdown_options,
-            .bootstrap = bootstrap,
-        };
-        ecs_or_imds_provider = aws_credentials_provider_new_imds(allocator, &imds_options);
     }
 
 clean_up:
 
     aws_string_destroy(ecs_relative_uri);
     aws_string_destroy(ecs_full_uri);
-    aws_string_destroy(ec2_imds_disable);
     aws_string_destroy(ecs_token);
 
-    return ecs_or_imds_provider;
+    return ecs_provider;
 }
 
 struct default_chain_callback_data {
@@ -279,10 +352,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
     sub_provider_shutdown_options.shutdown_user_data = provider;
 
     struct aws_tls_ctx *tls_ctx = NULL;
-    struct aws_credentials_provider *environment_provider = NULL;
-    struct aws_credentials_provider *profile_provider = NULL;
-    struct aws_credentials_provider *sts_provider = NULL;
-    struct aws_credentials_provider *ecs_or_imds_provider = NULL;
+
     struct aws_credentials_provider *chain_provider = NULL;
     struct aws_credentials_provider *cached_provider = NULL;
 
@@ -315,110 +385,85 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
     struct aws_credentials_provider *providers[PROVIDERS_SIZE];
     AWS_ZERO_ARRAY(providers);
     size_t index = 0;
-    const struct aws_byte_cursor providers_cursor =
-        AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("Environment;Profile;STS;EcsContainer;Ec2InstanceMetadata");
+
+    struct aws_string *ec2_imds_disable = NULL;
+    struct aws_string *envrionment_chain = NULL;
+    if (aws_get_environment_value(allocator, s_ecs_creds_env_relative_uri, &envrionment_chain) ||
+        aws_get_environment_value(allocator, s_ec2_creds_env_disable, &ec2_imds_disable) != AWS_OP_SUCCESS) {
+        goto on_error;
+    }
+
+    struct aws_byte_cursor default_providers_chain =
+        AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("Environment,Profile,STS,EcsContainer,Ec2InstanceMetadata");
+
+    if (envrionment_chain && envrionment_chain->len) {
+        struct aws_byte_cursor environment_chain_cursor = aws_byte_cursor_from_string(envrionment_chain);
+        if (!aws_byte_cursor_satisfies_pred(&environment_chain_cursor, aws_char_is_space)) {
+            default_providers_chain = environment_chain_cursor;
+        }
+    }
 
     struct aws_byte_cursor substr = {0};
-    while (aws_byte_cursor_next_split(&providers_cursor, ';', &substr)) {
+    while (aws_byte_cursor_next_split(&default_providers_chain, ',', &substr)) {
         if (aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_environment)) {
             struct aws_credentials_provider_environment_options environment_options;
             AWS_ZERO_STRUCT(environment_options);
-            environment_provider = aws_credentials_provider_new_environment(allocator, &environment_options);
-            if (environment_provider == NULL) {
-                goto on_error;
-            }
-            providers[index++] = environment_provider;
-            continue;
-        }
-        if (aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_profile)) {
+            providers[index++] = aws_credentials_provider_new_environment(allocator, &environment_options);
+        } else if (aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_profile)) {
             struct aws_credentials_provider_profile_options profile_options;
             AWS_ZERO_STRUCT(profile_options);
             profile_options.bootstrap = options->bootstrap;
             profile_options.tls_ctx = tls_ctx;
             profile_options.shutdown_options = sub_provider_shutdown_options;
-            profile_provider = aws_credentials_provider_new_profile(allocator, &profile_options);
+            struct aws_credentials_provider *profile_provider =
+                aws_credentials_provider_new_profile(allocator, &profile_options);
             if (profile_provider != NULL) {
                 providers[index++] = profile_provider;
                 /* 1 shutdown call from the profile provider's shutdown */
                 aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
             }
-            continue;
-        }
-        if (aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_sts)) {
+        } else if (aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_sts)) {
             struct aws_credentials_provider_sts_web_identity_options sts_options;
             AWS_ZERO_STRUCT(sts_options);
             sts_options.bootstrap = options->bootstrap;
             sts_options.tls_ctx = tls_ctx;
             sts_options.shutdown_options = sub_provider_shutdown_options;
-            sts_provider = aws_credentials_provider_new_sts_web_identity(allocator, &sts_options);
+            struct aws_credentials_provider *sts_provider =
+                aws_credentials_provider_new_sts_web_identity(allocator, &sts_options);
             if (sts_provider != NULL) {
                 providers[index++] = sts_provider;
                 /* 1 shutdown call from the web identity provider's shutdown */
                 aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
             }
-            continue;
-        }
-        if (aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_ecs_container)) {
-            ecs_or_imds_provider = s_aws_credentials_provider_new_ecs_or_imds(
+        } else if (aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_ecs_container)) {
+            struct aws_credentials_provider *ecs_provider = s_aws_credentials_provider_new_ecs(
                 allocator, &sub_provider_shutdown_options, options->bootstrap, tls_ctx);
-            if (ecs_or_imds_provider != NULL) {
-                providers[index++] = ecs_or_imds_provider;
+            if (ecs_provider != NULL) {
+                providers[index++] = ecs_provider;
                 /* 1 shutdown call from the imds or ecs provider's shutdown */
                 aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
             }
-            continue;
+        } else if (
+            aws_byte_cursor_eq_ignore_case(&substr, &s_credentials_provider_imds) && ec2_imds_disable != NULL &&
+            !aws_string_eq_c_str_ignore_case(ec2_imds_disable, "false")) {
+            struct aws_credentials_provider_imds_options imds_options = {
+                .shutdown_options = sub_provider_shutdown_options,
+                .bootstrap = options->bootstrap,
+            };
+            struct aws_credentials_provider *imds_provider =
+                aws_credentials_provider_new_imds(allocator, &imds_options);
+            if (imds_provider != NULL) {
+                providers[index++] = imds_provider;
+                /* 1 shutdown call from the imds or ecs provider's shutdown */
+                aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
+            }
         }
 
-        // Does not match Log
+        else {
+            // Does not match Log
+            AWS_LOGF_ERROR(AWS_LS_AUTH_CREDENTIALS_PROVIDER, "Does not match any known credentials provider");
+        }
     }
-
-    // enum { providers_size = 4 };
-    // struct aws_credentials_provider *providers[providers_size];
-    // AWS_ZERO_ARRAY(providers);
-    // size_t index = 0;
-
-    // struct aws_credentials_provider_environment_options environment_options;
-    // AWS_ZERO_STRUCT(environment_options);
-    // environment_provider = aws_credentials_provider_new_environment(allocator, &environment_options);
-    // if (environment_provider == NULL) {
-    //     goto on_error;
-    // }
-
-    // providers[index++] = environment_provider;
-
-    // struct aws_credentials_provider_profile_options profile_options;
-    // AWS_ZERO_STRUCT(profile_options);
-    // profile_options.bootstrap = options->bootstrap;
-    // profile_options.tls_ctx = tls_ctx;
-    // profile_options.shutdown_options = sub_provider_shutdown_options;
-    // profile_provider = aws_credentials_provider_new_profile(allocator, &profile_options);
-    // if (profile_provider != NULL) {
-    //     providers[index++] = profile_provider;
-    //     /* 1 shutdown call from the profile provider's shutdown */
-    //     aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
-    // }
-
-    // struct aws_credentials_provider_sts_web_identity_options sts_options;
-    // AWS_ZERO_STRUCT(sts_options);
-    // sts_options.bootstrap = options->bootstrap;
-    // sts_options.tls_ctx = tls_ctx;
-    // sts_options.shutdown_options = sub_provider_shutdown_options;
-    // sts_provider = aws_credentials_provider_new_sts_web_identity(allocator, &sts_options);
-    // if (sts_provider != NULL) {
-    //     providers[index++] = sts_provider;
-    //     /* 1 shutdown call from the web identity provider's shutdown */
-    //     aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
-    // }
-
-    // ecs_or_imds_provider = s_aws_credentials_provider_new_ecs_or_imds(
-    //     allocator, &sub_provider_shutdown_options, options->bootstrap, tls_ctx);
-    // if (ecs_or_imds_provider != NULL) {
-    //     providers[index++] = ecs_or_imds_provider;
-    //     /* 1 shutdown call from the imds or ecs provider's shutdown */
-    //     aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
-    // }
-
-    // AWS_FATAL_ASSERT(index <= providers_size);
 
     struct aws_credentials_provider_chain_options chain_options = {
         .provider_count = index,
@@ -436,14 +481,6 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
          */
         aws_credentials_provider_release(providers[i]);
     }
-
-    // /*
-    //  * Transfer ownership
-    //  */
-    // aws_credentials_provider_release(environment_provider);
-    // aws_credentials_provider_release(profile_provider);
-    // aws_credentials_provider_release(sts_provider);
-    // aws_credentials_provider_release(ecs_or_imds_provider);
 
     struct aws_credentials_provider_cached_options cached_options = {
         .source = chain_provider,
@@ -465,6 +502,8 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
     /* Subproviders have their own reference to the tls_ctx now */
     aws_tls_ctx_release(tls_ctx);
 
+    aws_string_destroy(envrionment_chain);
+
     return provider;
 
 on_error:
@@ -481,10 +520,9 @@ on_error:
     } else if (chain_provider) {
         aws_credentials_provider_release(chain_provider);
     } else {
-        aws_credentials_provider_release(ecs_or_imds_provider);
-        aws_credentials_provider_release(profile_provider);
-        aws_credentials_provider_release(sts_provider);
-        aws_credentials_provider_release(environment_provider);
+        for (size_t i = 0; i < index; i++) {
+            aws_credentials_provider_release(providers[i]);
+        }
     }
 
     aws_tls_ctx_release(tls_ctx);
