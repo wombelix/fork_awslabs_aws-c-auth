@@ -274,6 +274,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
     struct aws_credentials_provider *environment_provider = NULL;
     struct aws_credentials_provider *profile_provider = NULL;
     struct aws_credentials_provider *sts_provider = NULL;
+    struct aws_credentials_provider *sso_provider = NULL;
     struct aws_credentials_provider *ecs_or_imds_provider = NULL;
     struct aws_credentials_provider *chain_provider = NULL;
     struct aws_credentials_provider *cached_provider = NULL;
@@ -343,6 +344,18 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
         aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
     }
 
+    struct aws_credentials_provider_profile_options sso_options;
+    AWS_ZERO_STRUCT(sso_options);
+    sso_options.bootstrap = options->bootstrap;
+    sso_options.tls_ctx = tls_ctx;
+    sso_options.shutdown_options = sub_provider_shutdown_options;
+    sso_provider = aws_credentials_provider_new_sso(allocator, &sso_options);
+    if (sso_provider != NULL) {
+        providers[index++] = sso_provider;
+        /* 1 shutdown call from the sso provider's shutdown */
+        aws_atomic_fetch_add(&impl->shutdowns_remaining, 1);
+    }
+
     ecs_or_imds_provider = s_aws_credentials_provider_new_ecs_or_imds(
         allocator, &sub_provider_shutdown_options, options->bootstrap, tls_ctx);
     if (ecs_or_imds_provider != NULL) {
@@ -369,6 +382,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_chain_default(
     aws_credentials_provider_release(environment_provider);
     aws_credentials_provider_release(profile_provider);
     aws_credentials_provider_release(sts_provider);
+    aws_credentials_provider_release(sso_provider);
     aws_credentials_provider_release(ecs_or_imds_provider);
 
     struct aws_credentials_provider_cached_options cached_options = {
@@ -410,6 +424,7 @@ on_error:
         aws_credentials_provider_release(ecs_or_imds_provider);
         aws_credentials_provider_release(profile_provider);
         aws_credentials_provider_release(sts_provider);
+        aws_credentials_provider_release(sso_provider);
         aws_credentials_provider_release(environment_provider);
     }
 
