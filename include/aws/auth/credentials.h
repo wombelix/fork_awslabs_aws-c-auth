@@ -90,6 +90,44 @@ struct aws_credentials_provider_environment_options {
 };
 
 /**
+ * Configuration options for a provider that sources credentials from the SSO
+ * (by default ~/.aws/profile and ~/.aws/credentials)
+ */
+struct aws_credentials_provider_sso_options {
+    struct aws_credentials_provider_shutdown_options shutdown_options;
+
+    /*
+     * Override of what profile to use to source credentials from ('default' by default)
+     */
+    struct aws_byte_cursor profile_name_override;
+
+    /*
+     * Override path to the profile config file (~/.aws/config by default)
+     */
+    struct aws_byte_cursor config_file_name_override;
+
+    /*
+     * Bootstrap to use for any network connections made while sourcing credentials (for example,
+     * a profile that uses assume-role will need to hit STS)
+     */
+    struct aws_client_bootstrap *bootstrap;
+
+    /**
+     * (Optional) Http proxy configuration for the http request that fetches credentials
+     */
+    const struct aws_http_proxy_options *http_proxy_options;
+
+    /*
+     * Client TLS context to use for any secure network connections made while sourcing credentials
+     * (for example, a profile that uses assume-role will need to hit STS).
+     */
+    struct aws_tls_ctx *tls_ctx;
+
+    /* For mocking the http layer in tests, leave NULL otherwise */
+    struct aws_auth_http_system_vtable *function_table;
+};
+
+/**
  * Configuration options for a provider that sources credentials from the aws profile and credentials files
  * (by default ~/.aws/profile and ~/.aws/credentials)
  */
@@ -825,7 +863,6 @@ struct aws_credentials_provider *aws_credentials_provider_new_profile(
  * Creates an SSO provider which uses the aws config file ("~/.aws/config" by default)
  * to load the parameters for SSO requests.
  * It relies on a cached JSON access token in a directory underneath the config file.
- * The @options are similar to the profile provider (the override fields are not used).
  *
  * @param allocator memory allocator to use for all memory allocation
  * @param options provider-specific configuration options
@@ -835,7 +872,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_profile(
 AWS_AUTH_API
 struct aws_credentials_provider *aws_credentials_provider_new_sso(
     struct aws_allocator *allocator,
-    const struct aws_credentials_provider_profile_options *options);
+    const struct aws_credentials_provider_sso_options *options);
 
 /**
  * Creates a provider that assumes an IAM role via. STS AssumeRole() API. This provider will fetch new credentials
