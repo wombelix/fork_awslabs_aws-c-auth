@@ -85,7 +85,6 @@ struct sso_user_data {
     struct aws_http_message *request;
     struct aws_byte_buf response;
     struct aws_retry_token *retry_token;
-    struct aws_string *access_token;
 
     /* URI path and query string. */
     struct aws_byte_buf path_and_query;
@@ -120,7 +119,6 @@ static void s_user_data_destroy(struct sso_user_data *user_data) {
         impl->function_table->aws_http_connection_manager_release_connection(
             impl->connection_manager, user_data->connection);
     }
-    aws_string_destroy(user_data->access_token);
     aws_byte_buf_clean_up(&user_data->response);
     aws_retry_token_release(user_data->retry_token);
 
@@ -329,14 +327,6 @@ static struct sso_user_data *s_user_data_new(
     wrapped_user_data->original_user_data = user_data;
     wrapped_user_data->original_callback = callback;
 
-    // Fetch Access Token
-    struct aws_byte_buf *access_token = NULL;
-    if (s_load_access_token_from_file(wrapped_user_data->allocator, impl->token_path, access_token)) {
-        goto done;
-    }
-
-    wrapped_user_data->access_token = aws_string_new_from_buf(wrapped_user_data->allocator, access_token);
-
     struct aws_byte_cursor c_account_id = aws_byte_cursor_from_string(impl->account_id);
     struct aws_byte_cursor c_role_name = aws_byte_cursor_from_string(impl->role_name);
 
@@ -362,7 +352,6 @@ static struct sso_user_data *s_user_data_new(
     return wrapped_user_data;
 
 done:
-    aws_byte_buf_clean_up(access_token);
     s_user_data_destroy(wrapped_user_data);
 
     return NULL;
@@ -662,6 +651,13 @@ static void s_query_credentials(struct sso_user_data *user_data) {
 
     struct aws_credentials_provider_sso_impl *impl = user_data->sso_provider->impl;
     struct aws_http_stream *stream = NULL;
+
+    // Fetch Access Token
+    struct aws_byte_buf *access_token = NULL;
+    if (s_load_access_token_from_file(user_data->allocator, impl->token_path, access_token)) {
+        goto on_error;
+    }
+
     user_data->request = aws_http_message_new_request(user_data->allocator);
     if (user_data->request == NULL) {
         goto on_error;
@@ -669,7 +665,7 @@ static void s_query_credentials(struct sso_user_data *user_data) {
 
     struct aws_http_header auth_header = {
         .name = aws_byte_cursor_from_string(s_sso_token_header),
-        .value = aws_byte_cursor_from_string(user_data->access_token),
+        .value = aws_byte_cursor_from_buf(access_token),
     };
     struct aws_http_header host_header = {
         .name = AWS_BYTE_CUR_INIT_FROM_STRING_LITERAL("Host"),
@@ -712,12 +708,12 @@ static void s_query_credentials(struct sso_user_data *user_data) {
     if (impl->function_table->aws_http_stream_activate(stream)) {
         goto on_error;
     }
-
+    aws_byte_buf_clean_up(access_token);
     return;
 
 on_error:
     impl->function_table->aws_http_stream_release(stream);
-
+    aws_byte_buf_clean_up(access_token);
     s_finalize_get_credentials_query(user_data);
 }
 
