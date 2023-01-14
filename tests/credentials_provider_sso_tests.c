@@ -24,43 +24,51 @@
 #include <aws/io/stream.h>
 #include <aws/io/tls_channel_handler.h>
 
-// static struct aws_mock_sso_tester {
-//     struct aws_tls_ctx *tls_ctx;
+static struct aws_mock_sso_tester {
+    struct aws_tls_ctx *tls_ctx;
+    struct aws_byte_buf request_body;
+    struct aws_array_list response_data_callbacks;
+    bool is_connection_acquire_successful;
+    bool is_request_successful;
 
-//     struct aws_mutex lock;
-//     struct aws_condition_variable signal;
+    struct aws_mutex lock;
+    struct aws_condition_variable signal;
 
-//     struct aws_event_loop_group *el_group;
-//     struct aws_client_bootstrap *bootstrap;
+    struct aws_credentials *credentials;
+    bool has_received_credentials_callback;
+    bool has_received_shutdown_callback;
 
-//     bool has_received_shutdown_callback;
+    struct aws_event_loop_group *elg;
+    struct aws_client_bootstrap *bootstrap;
 
-//     int attempts;
-//     int response_code;
-//     int error_code;
-// } s_tester;
+    struct aws_string *actual_home;
 
-// static void s_on_shutdown_complete(void *user_data) {
-//     (void)user_data;
+    int attempts;
+    int response_code;
+    int error_code;
+} s_tester;
 
-//     aws_mutex_lock(&s_tester.lock);
-//     s_tester.has_received_shutdown_callback = true;
-//     aws_mutex_unlock(&s_tester.lock);
+static void s_on_shutdown_complete(void *user_data) {
+    (void)user_data;
 
-//     aws_condition_variable_notify_one(&s_tester.signal);
-// }
+    aws_mutex_lock(&s_tester.lock);
+    s_tester.has_received_shutdown_callback = true;
+    aws_mutex_unlock(&s_tester.lock);
 
-// static bool s_has_tester_received_shutdown_callback(void *user_data) {
-//     (void)user_data;
+    aws_condition_variable_notify_one(&s_tester.signal);
+}
 
-//     return s_tester.has_received_shutdown_callback;
-// }
+static bool s_has_tester_received_shutdown_callback(void *user_data) {
+    (void)user_data;
 
-// static void s_aws_wait_for_provider_shutdown_callback(void) {
-//     aws_mutex_lock(&s_tester.lock);
-//     aws_condition_variable_wait_pred(&s_tester.signal, &s_tester.lock, s_has_tester_received_shutdown_callback,
-//     NULL); aws_mutex_unlock(&s_tester.lock);
-// }
+    return s_tester.has_received_shutdown_callback;
+}
+
+static void s_aws_wait_for_provider_shutdown_callback(void) {
+    aws_mutex_lock(&s_tester.lock);
+    aws_condition_variable_wait_pred(&s_tester.signal, &s_tester.lock, s_has_tester_received_shutdown_callback, NULL);
+    aws_mutex_unlock(&s_tester.lock);
+}
 
 // /**
 //  * Create the directory components of @path:
@@ -87,25 +95,25 @@
 //     return AWS_OP_SUCCESS;
 // }
 
-// /**
-//  * Point AWS_CONFIG_FILE to a local profile created from @config_contents.
-//  * Set AWS_PROFILE to the "foo" profile (should exist in @config_contents).
-//  */
-// static int s_sso_provider_init_config_profile(
-//     struct aws_allocator *allocator,
-//     const struct aws_string *config_contents) {
-//     AWS_STATIC_STRING_FROM_LITERAL(s_sso_foo_profile, "foo");
-//     struct aws_string *config_file_path_str = aws_create_process_unique_file_name(allocator);
-//     ASSERT_NOT_NULL(config_file_path_str);
+/**
+ * Point AWS_CONFIG_FILE to a local profile created from @config_contents.
+ * Set AWS_PROFILE to the "foo" profile (should exist in @config_contents).
+ */
+static int s_sso_provider_init_config_profile(
+    struct aws_allocator *allocator,
+    const struct aws_string *config_contents) {
+    AWS_STATIC_STRING_FROM_LITERAL(s_sso_foo_profile, "foo");
+    struct aws_string *config_file_path_str = aws_create_process_unique_file_name(allocator);
+    ASSERT_NOT_NULL(config_file_path_str);
 
-//     ASSERT_SUCCESS(aws_create_profile_file(config_file_path_str, config_contents));
+    ASSERT_SUCCESS(aws_create_profile_file(config_file_path_str, config_contents));
 
-//     ASSERT_SUCCESS(aws_set_environment_value(s_default_config_path_env_variable_name, config_file_path_str));
-//     ASSERT_SUCCESS(aws_set_environment_value(s_default_profile_env_variable_name, s_sso_foo_profile));
+    ASSERT_SUCCESS(aws_set_environment_value(s_default_config_path_env_variable_name, config_file_path_str));
+    ASSERT_SUCCESS(aws_set_environment_value(s_default_profile_env_variable_name, s_sso_foo_profile));
 
-//     aws_string_destroy(config_file_path_str);
-//     return AWS_OP_SUCCESS;
-// }
+    aws_string_destroy(config_file_path_str);
+    return AWS_OP_SUCCESS;
+}
 
 // /**
 //  * Return the value of the sso_start_url for the given $AWS_PROFILE in $AWS_CONFIG_FILE.
@@ -153,72 +161,84 @@
 //     return result_sso_start_url;
 // }
 
-// static int s_aws_sso_tester_init(struct aws_allocator *allocator) {
-//     aws_auth_library_init(allocator);
+/* Environment variable content to redirect $HOME to "here". */
+AWS_STATIC_STRING_FROM_LITERAL(s_home_env_var, "HOME");
+AWS_STATIC_STRING_FROM_LITERAL(s_home_here, ".");
 
-//     struct aws_tls_ctx_options tls_options;
-//     aws_tls_ctx_options_init_default_client(&tls_options, allocator);
-//     s_tester.tls_ctx = aws_tls_client_ctx_new(allocator, &tls_options);
-//     ASSERT_NOT_NULL(s_tester.tls_ctx);
+static int s_aws_sso_tester_init(struct aws_allocator *allocator) {
+    aws_auth_library_init(allocator);
 
-//     if (aws_mutex_init(&s_tester.lock)) {
-//         return AWS_OP_ERR;
-//     }
+    struct aws_tls_ctx_options tls_options;
+    aws_tls_ctx_options_init_default_client(&tls_options, allocator);
+    s_tester.tls_ctx = aws_tls_client_ctx_new(allocator, &tls_options);
+    ASSERT_NOT_NULL(s_tester.tls_ctx);
 
-//     if (aws_condition_variable_init(&s_tester.signal)) {
-//         return AWS_OP_ERR;
-//     }
+    if (aws_mutex_init(&s_tester.lock)) {
+        return AWS_OP_ERR;
+    }
 
-//     /* Event loop is needed since SSO uses a retry strategy. */
-//     s_tester.el_group = aws_event_loop_group_new_default(allocator, 1, NULL);
-//     struct aws_client_bootstrap_options bootstrap_options = {
-//         .event_loop_group = s_tester.el_group,
-//         .user_data = NULL,
-//         .host_resolution_config = NULL,
-//         .host_resolver = NULL,
-//         .on_shutdown_complete = NULL,
-//     };
-//     s_tester.bootstrap = aws_client_bootstrap_new(allocator, &bootstrap_options);
-//     ASSERT_NOT_NULL(s_tester.bootstrap);
+    if (aws_condition_variable_init(&s_tester.signal)) {
+        return AWS_OP_ERR;
+    }
 
-//     return AWS_OP_SUCCESS;
-// }
+    /* Event loop is needed since SSO uses a retry strategy. */
+    s_tester.elg = aws_event_loop_group_new_default(allocator, 1, NULL);
+    struct aws_client_bootstrap_options bootstrap_options = {
+        .event_loop_group = s_tester.elg,
+        .user_data = NULL,
+        .host_resolution_config = NULL,
+        .host_resolver = NULL,
+        .on_shutdown_complete = NULL,
+    };
+    s_tester.bootstrap = aws_client_bootstrap_new(allocator, &bootstrap_options);
+    ASSERT_NOT_NULL(s_tester.bootstrap);
 
-// static void s_aws_sso_tester_cleanup(void) {
-//     aws_event_loop_group_release(s_tester.el_group);
-//     aws_client_bootstrap_release(s_tester.bootstrap);
-//     aws_tls_ctx_release(s_tester.tls_ctx);
-//     aws_condition_variable_clean_up(&s_tester.signal);
-//     aws_mutex_clean_up(&s_tester.lock);
-//     aws_auth_library_clean_up();
-// }
+    /* Redirect $HOME to the testing directory, to create the $HOME/.aws/sso/cache/<sha1>.json there. */
+    s_tester.actual_home = aws_string_new_from_c_str(allocator, getenv("HOME"));
+    ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, s_home_here));
 
-// /*
-//  * sso_access_token_path tests.
-//  */
-// extern struct aws_string *sso_access_token_path(
-//     struct aws_allocator *allocator,
-//     const struct aws_string *sso_start_url);
+    return AWS_OP_SUCCESS;
+}
+
+static void s_aws_sso_tester_cleanup(void) {
+    /* Reset Home */
+    aws_set_environment_value(s_home_env_var, s_tester.actual_home);
+    aws_string_destroy(s_tester.actual_home);
+
+    aws_event_loop_group_release(s_tester.elg);
+    aws_client_bootstrap_release(s_tester.bootstrap);
+    aws_tls_ctx_release(s_tester.tls_ctx);
+    aws_condition_variable_clean_up(&s_tester.signal);
+    aws_mutex_clean_up(&s_tester.lock);
+    aws_auth_library_clean_up();
+}
+
+/*
+ * sso_access_token_path tests.
+ */
+extern struct aws_string *sso_access_token_path(
+    struct aws_allocator *allocator,
+    const struct aws_string *sso_start_url);
 
 static int s_credentials_provider_sso_access_token_path_not_null(struct aws_allocator *allocator, void *ctx) {
     (void)ctx;
-    // struct aws_string *url_str = aws_string_new_from_c_str(allocator, "https://some.url/start");
-    // struct aws_string *empty_str = aws_string_new_from_c_str(allocator, "");
+    struct aws_string *url_str = aws_string_new_from_c_str(allocator, "https://some.url/start");
+    struct aws_string *empty_str = aws_string_new_from_c_str(allocator, "");
 
-    // aws_auth_library_init(allocator);
+    aws_auth_library_init(allocator);
 
-    // struct aws_string *token_path = sso_access_token_path(allocator, url_str);
-    // ASSERT_NOT_NULL(token_path);
-    // aws_string_destroy(token_path);
+    struct aws_string *token_path = sso_access_token_path(allocator, url_str);
+    ASSERT_NOT_NULL(token_path);
+    aws_string_destroy(token_path);
 
-    // token_path = sso_access_token_path(allocator, empty_str);
-    // ASSERT_NOT_NULL(token_path);
-    // aws_string_destroy(token_path);
+    token_path = sso_access_token_path(allocator, empty_str);
+    ASSERT_NOT_NULL(token_path);
+    aws_string_destroy(token_path);
 
-    // aws_string_destroy(url_str);
-    // aws_string_destroy(empty_str);
+    aws_string_destroy(url_str);
+    aws_string_destroy(empty_str);
 
-    // aws_auth_library_clean_up();
+    aws_auth_library_clean_up();
 
     return AWS_OP_SUCCESS;
 }
@@ -228,61 +248,60 @@ AWS_TEST_CASE(
 
 /* Table-driven test for sha1 sums of given (SSO Start) URLs. */
 static int s_credentials_provider_sso_access_token_path_sha1(struct aws_allocator *allocator, void *ctx) {
-    // const struct {
-    //     const char *url;
-    //     const char *sha1_sum;
-    // } sha1_sums[] = {
-    //     {"https://www.google.com", "ef7efc9839c3ee036f023e9635bc3b056d6ee2db"},
-    //     {"https://www.amazon.com/", "b7bccaa77123d0c319a96ef4bce9b8fb817a0619"},
-    //     {"https://aws.amazon.com", "87f8a6e65508244be74d473a01f9287f009ab21b"},
-    //     {"https://aws.amazon.com/", "bcf19c5764665c6db5bd1069e983a29edc433e65"},
-    //     {"https://aws.amazon.com/console/", "f302445b142e6456ee7219099e2f48de7bb646e7"},
-    // };
+    const struct {
+        const char *url;
+        const char *sha1_sum;
+    } sha1_sums[] = {
+        {"https://www.google.com", "ef7efc9839c3ee036f023e9635bc3b056d6ee2db"},
+        {"https://www.amazon.com/", "b7bccaa77123d0c319a96ef4bce9b8fb817a0619"},
+        {"https://aws.amazon.com", "87f8a6e65508244be74d473a01f9287f009ab21b"},
+        {"https://aws.amazon.com/", "bcf19c5764665c6db5bd1069e983a29edc433e65"},
+        {"https://aws.amazon.com/console/", "f302445b142e6456ee7219099e2f48de7bb646e7"},
+    };
 
-    // aws_auth_library_init(allocator);
+    aws_auth_library_init(allocator);
 
-    // for (int i = 0; i < sizeof(sha1_sums) / sizeof(sha1_sums[0]); i++) {
-    //     struct aws_string *url_str = aws_string_new_from_c_str(allocator, sha1_sums[i].url);
-    //     struct aws_string *token_path = sso_access_token_path(allocator, url_str);
-    //     struct aws_byte_cursor sha1_cursor = aws_byte_cursor_from_c_str(sha1_sums[i].sha1_sum);
-    //     struct aws_byte_cursor token_cursor = aws_byte_cursor_from_string(token_path);
-    //     struct aws_byte_cursor find_cursor = {0};
+    for (int i = 0; i < sizeof(sha1_sums) / sizeof(sha1_sums[0]); i++) {
+        struct aws_string *url_str = aws_string_new_from_c_str(allocator, sha1_sums[i].url);
+        struct aws_string *token_path = sso_access_token_path(allocator, url_str);
+        struct aws_byte_cursor sha1_cursor = aws_byte_cursor_from_c_str(sha1_sums[i].sha1_sum);
+        struct aws_byte_cursor token_cursor = aws_byte_cursor_from_string(token_path);
+        struct aws_byte_cursor find_cursor = {0};
 
-    //     ASSERT_SUCCESS(aws_byte_cursor_find_exact(&token_cursor, &sha1_cursor, &find_cursor));
+        ASSERT_SUCCESS(aws_byte_cursor_find_exact(&token_cursor, &sha1_cursor, &find_cursor));
 
-    //     aws_string_destroy(url_str);
-    //     aws_string_destroy(token_path);
-    // }
+        aws_string_destroy(url_str);
+        aws_string_destroy(token_path);
+    }
 
-    // aws_auth_library_clean_up();
+    aws_auth_library_clean_up();
 
     return AWS_OP_SUCCESS;
 }
 AWS_TEST_CASE(credentials_provider_sso_access_token_path_sha1, s_credentials_provider_sso_access_token_path_sha1);
 
-// /* Environment variable content to redirect $HOME to "here". */
-// AWS_STATIC_STRING_FROM_LITERAL(s_home_env_var, "HOME");
-// AWS_STATIC_STRING_FROM_LITERAL(s_home_here, ".");
-
 static int s_credentials_provider_sso_provider_profile_file_missing(struct aws_allocator *allocator, void *ctx) {
     (void)ctx;
-    // s_aws_sso_tester_init(allocator);
+    s_aws_sso_tester_init(allocator);
 
-    // struct aws_string *actual_home = aws_string_new_from_c_str(allocator, getenv("HOME"));
-    // struct aws_credentials_provider_profile_options options = {0};
+    struct aws_string *actual_home = aws_string_new_from_c_str(allocator, getenv("HOME"));
+    struct aws_credentials_provider_sso_options options = {
+        .tls_ctx = s_tester.tls_ctx,
+        .bootstrap = s_tester.bootstrap,
+    };
 
-    // options.tls_ctx = s_tester.tls_ctx;
+    options.tls_ctx = s_tester.tls_ctx;
 
-    // /* Redirect $HOME to a place that has no .aws/config file. */
-    // ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, s_home_here));
+    /* Redirect $HOME to a place that has no .aws/config file. */
+    ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, s_home_here));
 
-    // ASSERT_PTR_EQUALS(NULL, aws_credentials_provider_new_sso(allocator, &options));
+    ASSERT_PTR_EQUALS(NULL, aws_credentials_provider_new_sso(allocator, &options));
 
-    // /* Clean up */
-    // ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, actual_home));
-    // aws_string_destroy(actual_home);
+    /* Clean up */
+    ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, actual_home));
+    aws_string_destroy(actual_home);
 
-    // s_aws_sso_tester_cleanup();
+    s_aws_sso_tester_cleanup();
 
     return AWS_OP_SUCCESS;
 }
@@ -290,31 +309,60 @@ AWS_TEST_CASE(
     credentials_provider_sso_provider_profile_file_missing,
     s_credentials_provider_sso_provider_profile_file_missing);
 
-// AWS_STATIC_STRING_FROM_LITERAL(
-//     sso_test_profile_contents,
-//     "[profile default]\n"
-//     "sso_start_url = https://sso-default.awsapps.com/start\n"
-//     "sso_region = us-east-1\n"
-//     "sso_account_id = 270484358888\n"
-//     "sso_role_name = Tester\n"
-//     "region = us-east-1\n"
-//     "output = json\n"
-//     "[profile foo]\n"
-//     "sso_start_url = https://sso-foo.awsapps.com/start\n"
-//     "sso_region = us-west-2\n"
-//     "sso_account_id = 270484358888\n"
-//     "sso_role_name = Tester\n"
-//     "region = us-west-2\n"
-//     "output = json\n");
+AWS_STATIC_STRING_FROM_LITERAL(
+    sso_test_profile_contents,
+    "[profile default]\n"
+    "sso_start_url = https://sso-default.awsapps.com/start\n"
+    "sso_region = us-east-1\n"
+    "sso_account_id = 270484358888\n"
+    "sso_role_name = Tester\n"
+    "region = us-east-1\n"
+    "output = json\n"
+    "[profile foo]\n"
+    "sso_start_url = https://sso-foo.awsapps.com/start\n"
+    "sso_region = us-west-2\n"
+    "sso_account_id = 270484358888\n"
+    "sso_role_name = Tester\n"
+    "region = us-west-2\n"
+    "output = json\n");
+
+static int s_credentials_provider_sso_new_destroy_from_config(struct aws_allocator *allocator, void *ctx) {
+    (void)ctx;
+
+    s_aws_sso_tester_init(allocator);
+    struct aws_credentials_provider_sso_options options = {
+        .bootstrap = s_tester.bootstrap,
+        .tls_ctx = s_tester.tls_ctx,
+        .shutdown_options =
+            {
+                .shutdown_callback = s_on_shutdown_complete,
+                .shutdown_user_data = NULL,
+            },
+    };
+
+    ASSERT_SUCCESS(s_sso_provider_init_config_profile(allocator, sso_test_profile_contents));
+
+    struct aws_credentials_provider *provider = aws_credentials_provider_new_sso(allocator, &options);
+    ASSERT_NOT_NULL(provider);
+    aws_credentials_provider_release(provider);
+
+    s_aws_wait_for_provider_shutdown_callback();
+
+    s_aws_sso_tester_cleanup();
+
+    return AWS_OP_SUCCESS;
+}
+AWS_TEST_CASE(credentials_provider_sso_new_destroy_from_config, s_credentials_provider_sso_new_destroy_from_config);
 
 static int s_credentials_provider_sso_provider_access_token_file_missing(struct aws_allocator *allocator, void *ctx) {
     (void)ctx;
-    // struct aws_credentials_provider_profile_options options = {0};
 
     // s_aws_sso_tester_init(allocator);
 
-    // options.tls_ctx = s_tester.tls_ctx;
-
+    // struct aws_credentials_provider_sso_options options = {
+    //     .tls_ctx = s_tester.tls_ctx,
+    //     .bootstrap = s_tester.bootstrap,
+    // };
     // /* Redirect $HOME to the testing directory without creating the access token file .aws/sso/cache/<sha1>.json. */
     // struct aws_string *actual_home = aws_string_new_from_c_str(allocator, getenv("HOME"));
     // ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, s_home_here));
@@ -325,8 +373,9 @@ static int s_credentials_provider_sso_provider_access_token_file_missing(struct 
     // aws_string_destroy(fake_cache_dir);
 
     // ASSERT_SUCCESS(s_sso_provider_init_config_profile(allocator, sso_test_profile_contents));
-
-    // ASSERT_PTR_EQUALS(NULL, aws_credentials_provider_new_sso(allocator, &options));
+    // struct aws_credentials_provider *provider = aws_credentials_provider_new_sso(allocator, &options);
+    // ASSERT_NOT_NULL(provider);
+    // aws_credentials_provider_release(provider);
 
     // /* Clean up */
     // ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, actual_home));
@@ -384,56 +433,3 @@ static int s_credentials_provider_sso_provider_access_token_expired(struct aws_a
 AWS_TEST_CASE(
     credentials_provider_sso_provider_access_token_expired,
     s_credentials_provider_sso_provider_access_token_expired);
-
-static int s_credentials_provider_sso_new_destroy_from_config(struct aws_allocator *allocator, void *ctx) {
-    (void)ctx;
-    // AWS_STATIC_STRING_FROM_LITERAL(sso_eternal_access_token, "{\
-    //       \"startUrl\": \"https://sso-foo.awsapps.com/start\",\
-    //       \"region\": \"us-west-2\",\
-    //       \"accessToken\": \"FakeAccessTokenContent\",\
-    //       \"expiresAt\": \"2099-12-31T23:59:59Z\"\
-    //     }\n");
-    // s_aws_sso_tester_init(allocator);
-
-    // ASSERT_SUCCESS(s_sso_provider_init_config_profile(allocator, sso_test_profile_contents));
-
-    // /* Redirect $HOME to the testing directory, to create the $HOME/.aws/sso/cache/<sha1>.json there. */
-    // struct aws_string *actual_home = aws_string_new_from_c_str(allocator, getenv("HOME"));
-    // ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, s_home_here));
-
-    // /* Create access token file. */
-    // struct aws_string *start_url = s_sso_extract_start_url_from_profile(allocator);
-    // ASSERT_NOT_NULL(start_url);
-
-    // struct aws_string *token_path = sso_access_token_path(allocator, start_url);
-    // ASSERT_NOT_NULL(token_path);
-
-    // ASSERT_SUCCESS(s_create_directory_components(allocator, token_path));
-    // ASSERT_SUCCESS(aws_create_profile_file(token_path, sso_eternal_access_token));
-
-    // struct aws_credentials_provider_profile_options options = {
-    //     .bootstrap = s_tester.bootstrap,
-    //     .tls_ctx = s_tester.tls_ctx,
-    //     .shutdown_options =
-    //         {
-    //             .shutdown_callback = s_on_shutdown_complete,
-    //             .shutdown_user_data = NULL,
-    //         },
-    // };
-
-    // struct aws_credentials_provider *provider = aws_credentials_provider_new_sso(allocator, &options);
-    // aws_credentials_provider_release(provider);
-
-    // s_aws_wait_for_provider_shutdown_callback();
-
-    // /* Clean up */
-    // ASSERT_SUCCESS(aws_set_environment_value(s_home_env_var, actual_home));
-    // aws_string_destroy(actual_home);
-    // aws_string_destroy(start_url);
-    // aws_string_destroy(token_path);
-
-    // s_aws_sso_tester_cleanup();
-
-    return AWS_OP_SUCCESS;
-}
-AWS_TEST_CASE(credentials_provider_sso_new_destroy_from_config, s_credentials_provider_sso_new_destroy_from_config);

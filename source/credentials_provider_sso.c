@@ -971,7 +971,6 @@ done:
     aws_profile_collection_destroy(config_profile);
     aws_string_destroy(config_file_path);
     aws_string_destroy(profile_name);
-    aws_string_destroy(token_path);
 
     return parameters;
 }
@@ -983,7 +982,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_sso(
     AWS_FATAL_ASSERT(options);
 
     if (!options->bootstrap) {
-        AWS_LOGF_ERROR(AWS_LS_AUTH_CREDENTIALS_PROVIDER, "a client bootstrap is necessary for quering SSO");
+        AWS_LOGF_ERROR(AWS_LS_AUTH_CREDENTIALS_PROVIDER, "a client bootstrap is necessary for quering SSO.");
         aws_raise_error(AWS_ERROR_INVALID_ARGUMENT);
         return NULL;
     }
@@ -997,7 +996,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_sso(
     struct sso_parameters *parameters = NULL;
     struct aws_credentials_provider *provider = NULL;
     struct aws_credentials_provider_sso_impl *impl = NULL;
-    struct aws_byte_buf *endpoint = NULL;
+    struct aws_byte_buf endpoint;
     bool success = false;
 
     aws_mem_acquire_many(
@@ -1010,6 +1009,7 @@ struct aws_credentials_provider *aws_credentials_provider_new_sso(
 
     AWS_ZERO_STRUCT(*provider);
     AWS_ZERO_STRUCT(*impl);
+    AWS_ZERO_STRUCT(endpoint);
 
     AWS_LOGF_DEBUG(AWS_LS_AUTH_CREDENTIALS_PROVIDER, "sso: creating SSO credentials provider");
 
@@ -1033,10 +1033,10 @@ struct aws_credentials_provider *aws_credentials_provider_new_sso(
         goto done;
     }
 
-    if (s_construct_endpoint(allocator, parameters->region, endpoint)) {
+    if (s_construct_endpoint(allocator, parameters->region, &endpoint)) {
         goto done;
     }
-    struct aws_byte_cursor host = aws_byte_cursor_from_buf(endpoint);
+    struct aws_byte_cursor host = aws_byte_cursor_from_buf(&endpoint);
     if (aws_tls_connection_options_set_server_name(&tls_connection_options, allocator, &host)) {
         AWS_LOGF_INFO(
             AWS_LS_AUTH_CREDENTIALS_PROVIDER,
@@ -1090,12 +1090,13 @@ struct aws_credentials_provider *aws_credentials_provider_new_sso(
         goto done;
     }
 
-    impl->endpoint = aws_string_new_from_buf(allocator, endpoint);
+    impl->endpoint = aws_string_new_from_buf(allocator, &endpoint);
     impl->account_id = aws_string_new_from_string(allocator, parameters->account_id);
     impl->role_name = aws_string_new_from_string(allocator, parameters->role_name);
     impl->token_path = aws_string_new_from_string(allocator, parameters->token_path);
     provider->shutdown_options = options->shutdown_options;
     success = true;
+    AWS_LOGF_TRACE(AWS_LS_AUTH_CREDENTIALS_PROVIDER, "Successfully created SSO credentials provider.");
 
 done:
     if (!success) {
@@ -1103,7 +1104,7 @@ done:
         provider = NULL;
     }
     s_parameters_destroy(parameters);
-    aws_byte_buf_clean_up(endpoint);
+    aws_byte_buf_clean_up(&endpoint);
     aws_tls_connection_options_clean_up(&tls_connection_options);
 
     return provider;
