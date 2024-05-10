@@ -864,7 +864,7 @@ static int s_credentials_provider_ecs_basic_success_uri_env(struct aws_allocator
             case_i.auth_token_file_content,
             case_i.expected_uri,
             case_i.expected_auth_token));
-
+        s_aws_ecs_tester_reset();
         s_aws_ecs_tester_reset();
     }
 
